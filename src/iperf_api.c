@@ -959,6 +959,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         {"zerocopy", no_argument, NULL, 'Z'},
         {"omit", required_argument, NULL, 'O'},
         {"file", required_argument, NULL, 'F'},
+        {"fileseek", required_argument, NULL, 'K'}, 
         {"repeating-payload", no_argument, NULL, OPT_REPEATING_PAYLOAD},
         {"timestamps", optional_argument, NULL, OPT_TIMESTAMPS},
 #if defined(HAVE_CPU_AFFINITY)
@@ -1016,7 +1017,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
     char *client_username = NULL, *client_rsa_public_key = NULL, *server_rsa_private_key = NULL;
 #endif /* HAVE_SSL */
 
-    while ((flag = getopt_long(argc, argv, "p:f:i:D1VJvsc:ub:t:n:k:l:P:Rw:B:M:N46S:L:ZO:F:A:T:C:dI:hX:", longopts, NULL)) != -1) {
+    while ((flag = getopt_long(argc, argv, "p:f:i:D1VJvsc:ub:t:n:k:l:P:Rw:B:M:N46S:L:ZO:F:K:A:T:C:dI:hX:", longopts, NULL)) != -1) {
         switch (flag) {
             case 'p':
 		portno = atoi(optarg);
@@ -1315,6 +1316,9 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
             case 'F':
                 test->diskfile_name = optarg;
                 break;
+            case 'K': // seek in file
+                test->diskfile_seek = atoi(optarg);
+                break;
             case OPT_IDLE_TIMEOUT:
                 test->settings->idle_timeout = atoi(optarg);
                 if (test->settings->idle_timeout < 1 || test->settings->idle_timeout > MAX_TIME) {
@@ -1546,6 +1550,8 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         struct stat st;
         stat(test->diskfile_name, &st);
         iperf_size_t file_bytes = st.st_size;
+        // if we are seeking in file, decrease file size by seek value
+        file_bytes -= test->diskfile_seek;
         test->settings->bytes = file_bytes;        
         if (test->debug)
             printf("End condition set to file-size: %d bytes\n", test->settings->bytes);
@@ -2607,6 +2613,7 @@ iperf_defaults(struct iperf_test *testp)
     testp->omit = OMIT;
     testp->duration = DURATION;
     testp->diskfile_name = (char*) 0;
+    testp->diskfile_seek = 0;
     testp->affinity = -1;
     testp->server_affinity = -1;
     TAILQ_INIT(&testp->xbind_addrs);
@@ -4047,7 +4054,16 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
             free(sp);
 	    return NULL;
 	}
-        sp->snd2 = sp->snd;
+    // Seek to file location if asked for
+    if(test->diskfile_seek > 0){
+        if(lseek(sp->diskfile_fd, test->diskfile_seek,SEEK_SET) < 0){
+            // Error !
+            i_errno = IEFILE;
+            return NULL;
+        }
+    }
+
+    sp->snd2 = sp->snd;
 	sp->snd = diskfile_send;
 	sp->rcv2 = sp->rcv;
 	sp->rcv = diskfile_recv;
