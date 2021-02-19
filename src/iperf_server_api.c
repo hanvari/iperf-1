@@ -161,6 +161,47 @@ iperf_accept(struct iperf_test *test)
     return 0;
 }
 
+// function to be used with timer for reliably receiving data
+// this makes sure we wait until receiving the exact number of bytes as sent by client
+Timer *server_receive_timer_defer_termination;
+static void
+server_defer_test_done_until_receive_all(TimerClientData client_data, struct iperf_time *nowP){
+struct iperf_test *test = client_data.p;
+
+    if (test->debug)
+        printf("Deferred TEST_END. test state: %d, bytes received %d out of %d\n",test->state, test->bytes_received, test->settings->bytes);
+
+    struct iperf_stream *sp;
+    
+    if (test->settings->bytes != 0 &&
+        test->bytes_received >= test->settings->bytes) {
+        // first, cancel the timer !
+        tmr_cancel(server_receive_timer_defer_termination);
+        // Then, the rest
+        if (test->debug)
+            printf("It seems we received sufficient data! %d out of %d bytes",test->bytes_received,test->settings->bytes);
+        // Test done :)
+        // Taken from TEST_END case in message handler function
+        test->state = TEST_END; // manual, since we revert it in the switch/case
+        test->done = 1;
+            cpu_util(test->cpu_util);
+            test->stats_callback(test);
+            SLIST_FOREACH(sp, &test->streams, streams) {
+                FD_CLR(sp->socket, &test->read_set);
+                FD_CLR(sp->socket, &test->write_set);
+                close(sp->socket);
+            }
+            test->reporter_callback(test);
+        if (iperf_set_send_state(test, EXCHANGE_RESULTS) != 0)
+                return -1;
+            if (iperf_exchange_results(test) < 0)
+                return -1;
+        if (iperf_set_send_state(test, DISPLAY_RESULTS) != 0)
+                return -1;
+            if (test->on_test_finish)
+                test->on_test_finish(test);
+    }
+}
 
 /**************************************************************************/
 int
@@ -182,27 +223,37 @@ iperf_handle_message_server(struct iperf_test *test)
         }
     }
 
+    // Used in TEST_END case
+    struct iperf_time now;
+    TimerClientData cd;
+
     switch(test->state) {
         case TEST_START:
             break;
         case TEST_END:
-	    test->done = 1;
-            cpu_util(test->cpu_util);
-            test->stats_callback(test);
-            SLIST_FOREACH(sp, &test->streams, streams) {
-                FD_CLR(sp->socket, &test->read_set);
-                FD_CLR(sp->socket, &test->write_set);
-                close(sp->socket);
+            if (test->debug)
+                printf("In TEST_END. Registering a timer...\n");                
+            // getting size of data to be received (bytes_count)
+            if (test->debug){
+                printf("Receiving total bytes count...\n");
+                printf("Current test->settings->bytes is %d\n", test->settings->bytes);
             }
-            test->reporter_callback(test);
-	    if (iperf_set_send_state(test, EXCHANGE_RESULTS) != 0)
+            int32_t netBytesSent;
+            if (Nread(test->ctrl_sck, (char*) &netBytesSent, sizeof(netBytesSent), Ptcp) < 0) {
+                i_errno = IESENDMESSAGE;
                 return -1;
-            if (iperf_exchange_results(test) < 0)
+            }
+            test->settings->bytes = ntohl(netBytesSent);
+            if (test->debug)
+                printf("New test->settings->bytes is %d\n", test->settings->bytes);
+            // registering the timer to check if all data received to terminate	        
+            if (iperf_time_now(&now) < 0) {
+                i_errno = IEINITTEST;
                 return -1;
-	    if (iperf_set_send_state(test, DISPLAY_RESULTS) != 0)
-                return -1;
-            if (test->on_test_finish)
-                test->on_test_finish(test);
+            }
+            cd.p = test;
+            server_receive_timer_defer_termination = tmr_create(&now, server_defer_test_done_until_receive_all, cd, 1 * SEC_TO_US, 1);
+            test->state = TEST_RUNNING; // to avoid any side-effects
             break;
         case IPERF_DONE:
             break;
